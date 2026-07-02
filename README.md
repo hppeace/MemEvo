@@ -23,13 +23,14 @@ uv run memevo --config config.toml
 
 运行结果写入配置中的 `output_dir`：
 
-- `answers.json`：各问题的标准答案、模型回答和回答模型 token 用量；
-- `evaluation.json`：judge 结果、准确率和 judge token 用量；
+- `answers.json`：各问题的标准答案和模型回答；
+- `evaluation.json`：judge 结果和准确率；
+- `usage.json`：所有模型按实验阶段统计的调用次数和 token 用量；
 - `memory/`：算法按 conversation 保存的中间记忆。
 
 程序会在每个回答后刷新 `answers.json`，中断时也能保留已完成结果。
-`model_usage` 按模型和 `ingest`、`retrieve`、`answer`、`judge` 阶段分别统计
-调用次数及 token；未调用模型的阶段显示为 0。
+`usage.json` 按模型和 `ingest`、`retrieve`、`answer`、`judge` 阶段分别统计
+token，并在程序退出前刷新。
 终端会显示 conversation、阶段操作和 judge 问题的进度条。
 `retrieve`、`answer` 和 `judge` 会并发执行，默认并发数为 32，可通过
 `[run] concurrency` 调整。

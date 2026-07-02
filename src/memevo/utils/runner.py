@@ -114,10 +114,12 @@ async def run_benchmark(config: BenchmarkConfig) -> dict[str, float | int]:
     algorithm.reset_all()
     answers_path = config.output_dir / "answers.json"
     evaluation_path = config.output_dir / "evaluation.json"
+    usage_path = config.output_dir / "usage.json"
     results: list[dict[str, Any]] = []
 
     try:
-        _write_answers(answers_path, config, results, models)
+        _write_answers(answers_path, config, results)
+        _write_usage(usage_path, config, models)
         for conv_index in config.conv_indices:
             conversation = dataset.load(conv_index)
             with tqdm(
@@ -182,7 +184,8 @@ async def run_benchmark(config: BenchmarkConfig) -> dict[str, float | int]:
                         "evidence": item.evidence,
                     }
                 )
-            _write_answers(answers_path, config, results, models)
+            _write_answers(answers_path, config, results)
+            _write_usage(usage_path, config, models)
 
         with models.stage("judge"):
             metrics = await dataset.evaluate(
@@ -191,13 +194,10 @@ async def run_benchmark(config: BenchmarkConfig) -> dict[str, float | int]:
                 evaluation_path,
                 config.concurrency,
             )
-        _write_answers(answers_path, config, results, models)
-        tqdm.write(
-            f"[{config.name}] accuracy: {metrics['correct']}/{metrics['total']} "
-            f"({metrics['accuracy']:.2%})"
-        )
+        _write_usage(usage_path, config, models)
         return metrics
     finally:
+        _write_usage(usage_path, config, models)
         await models.close()
 
 
@@ -230,6 +230,19 @@ def _write_answers(
     path: Path,
     config: BenchmarkConfig,
     results: list[dict[str, Any]],
+) -> None:
+    write_json(
+        path,
+        {
+            "run_name": config.name,
+            "qa_results": results,
+        },
+    )
+
+
+def _write_usage(
+    path: Path,
+    config: BenchmarkConfig,
     models: ModelPool,
 ) -> None:
     write_json(
@@ -237,7 +250,6 @@ def _write_answers(
         {
             "run_name": config.name,
             "model_usage": models.usage_summary(),
-            "qa_results": results,
         },
     )
 

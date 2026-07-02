@@ -3,7 +3,7 @@ from typing import Any
 
 
 ANSWER_PROMPT = """Use the conversation below to answer the question.
-Preserve names, numbers, dates, places, and other specific details. If the
+Preserve names, numbers, specific dates, places, and other specific details. If the
 answer is absent, say that the conversation does not provide it.
 
 Conversation:

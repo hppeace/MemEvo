@@ -229,7 +229,6 @@ async def judge(
         output_path,
         {
             "metrics": metrics,
-            "judge_llm_usage": judge_llm.usage_summary(),
             "results": results,
         },
     )
