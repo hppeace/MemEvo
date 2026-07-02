@@ -1,0 +1,26 @@
+# Keep API keys in .env by default
+
+[run]
+name = "Full Contex Algorithm Baseline of LoCoMo"
+output_dir = "runs/full_context_example"
+
+
+[dataset]
+path = "../../data/locomo10.json"
+# Benchmark uses conversations 0..9.
+conv_indices = "0-9"
+# Excluded 5 which are adversarial.
+exclude_category = 5
+
+
+[algorithm.models.answer]
+model = "qwen3-8b"
+base_url = "https://192.168.2.37:8000/v1"
+api_key_env = "ANSWER_API_KEY"
+
+
+[algorithm.models.judge]
+model = "qwen3-8b"
+base_url = "https://192.168.2.37:8000/v1"
+api_key_env = "JUDGE_API_KEY"
+
