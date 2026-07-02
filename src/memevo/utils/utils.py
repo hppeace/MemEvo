@@ -2,9 +2,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Iterable
 from pathlib import Path
-from typing import Any, TypeVar
-
-T = TypeVar("T")
+from typing import Any
 
 PROGRESS_FORMAT = (
     "{desc:<24}: {percentage:3.0f}%|{bar}| "
@@ -17,7 +15,7 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-async def gather_limited(
+async def gather_limited[T](
     awaitables: Iterable[Awaitable[T]], limit: int = 32
 ) -> list[T]:
     if limit < 1:

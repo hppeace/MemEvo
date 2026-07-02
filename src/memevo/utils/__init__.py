@@ -1,1 +1,1 @@
-"""Shared clients and experiment utilities."""
+"""Shared experiment utilities."""

@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import os
 import tomllib
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,9 +70,9 @@ def parse_indices(value: str | Sequence[int]) -> list[int]:
 def load_config(path: Path) -> BenchmarkConfig:
     load_dotenv()
     payload = tomllib.loads(path.read_text(encoding="utf-8"))
-    run = _section(payload, "run")
-    dataset = dict(_section(payload, "dataset"))
-    algorithm = dict(_section(payload, "algorithm"))
+    run = _mapping(payload.get("run"), "run")
+    dataset = dict(_mapping(payload.get("dataset"), "dataset"))
+    algorithm = dict(_mapping(payload.get("algorithm"), "algorithm"))
     model_sections = payload.get("models", algorithm.pop("models", None))
     if not isinstance(model_sections, Mapping):
         raise ConfigError("Missing or invalid [models] section")
@@ -118,60 +118,36 @@ async def run_benchmark(config: BenchmarkConfig) -> dict[str, float | int]:
     results: list[dict[str, Any]] = []
 
     try:
-        _write_answers(answers_path, config, results)
-        _write_usage(usage_path, config, models)
+        _write_output(answers_path, config.name, qa_results=results)
+        _write_output(
+            usage_path,
+            config.name,
+            model_usage=models.usage_summary(),
+        )
         for conv_index in config.conv_indices:
             conversation = dataset.load(conv_index)
-            with tqdm(
-                total=1,
-                desc=f"Ingest Conversation {conv_index}",
-                unit="Step",
-                ncols=100,
-                bar_format=PROGRESS_FORMAT,
-            ) as progress:
-                with models.stage("ingest"):
-                    await algorithm.ingest(conv_index, conversation.messages)
+            with _progress(f"Ingest Conversation {conv_index}", 1, "Step") as progress:
+                await algorithm.ingest(conv_index, conversation.messages)
                 progress.update()
 
-            with tqdm(
-                total=len(conversation.qa),
-                desc=f"Retrieve Conversation {conv_index}",
-                unit="Question",
-                ncols=100,
-                bar_format=PROGRESS_FORMAT,
-            ) as progress:
-                with models.stage("retrieve"):
-                    memories = await gather_limited(
-                        (
-                            _tracked(
-                                algorithm.retrieve(conv_index, item.question),
-                                progress,
-                            )
-                            for item in conversation.qa
-                        ),
-                        config.concurrency,
-                    )
-
-            with tqdm(
-                total=len(conversation.qa),
-                desc=f"Answer Conversation {conv_index}",
-                unit="Question",
-                ncols=100,
-                bar_format=PROGRESS_FORMAT,
-            ) as progress:
-                with models.stage("answer"):
-                    responses = await gather_limited(
-                        (
-                            _tracked(
-                                algorithm.answer(item.question, memory),
-                                progress,
-                            )
-                            for item, memory in zip(
-                                conversation.qa, memories, strict=True
-                            )
-                        ),
-                        config.concurrency,
-                    )
+            memories = await _gather_with_progress(
+                f"Retrieve Conversation {conv_index}",
+                (
+                    algorithm.retrieve(conv_index, item.question)
+                    for item in conversation.qa
+                ),
+                len(conversation.qa),
+                config.concurrency,
+            )
+            responses = await _gather_with_progress(
+                f"Answer Conversation {conv_index}",
+                (
+                    algorithm.answer(item.question, memory)
+                    for item, memory in zip(conversation.qa, memories, strict=True)
+                ),
+                len(conversation.qa),
+                config.concurrency,
+            )
 
             for item, response in zip(conversation.qa, responses, strict=True):
                 results.append(
@@ -184,20 +160,26 @@ async def run_benchmark(config: BenchmarkConfig) -> dict[str, float | int]:
                         "evidence": item.evidence,
                     }
                 )
-            _write_answers(answers_path, config, results)
-            _write_usage(usage_path, config, models)
-
-        with models.stage("judge"):
-            metrics = await dataset.evaluate(
-                models,
-                answers_path,
-                evaluation_path,
-                config.concurrency,
+            _write_output(answers_path, config.name, qa_results=results)
+            _write_output(
+                usage_path,
+                config.name,
+                model_usage=models.usage_summary(),
             )
-        _write_usage(usage_path, config, models)
+
+        metrics = await dataset.evaluate(
+            models,
+            answers_path,
+            evaluation_path,
+            config.concurrency,
+        )
         return metrics
     finally:
-        _write_usage(usage_path, config, models)
+        _write_output(
+            usage_path,
+            config.name,
+            model_usage=models.usage_summary(),
+        )
         await models.close()
 
 
@@ -226,39 +208,38 @@ def _create_models(configs: Mapping[str, ModelConfig]) -> ModelPool:
     return ModelPool(clients)
 
 
-def _write_answers(
-    path: Path,
-    config: BenchmarkConfig,
-    results: list[dict[str, Any]],
-) -> None:
-    write_json(
-        path,
-        {
-            "run_name": config.name,
-            "qa_results": results,
-        },
+def _write_output(path: Path, run_name: str, **data: Any) -> None:
+    write_json(path, {"run_name": run_name, **data})
+
+
+def _progress(description: str, total: int, unit: str) -> tqdm:
+    return tqdm(
+        total=total,
+        desc=description,
+        unit=unit,
+        ncols=100,
+        bar_format=PROGRESS_FORMAT,
     )
 
 
-def _write_usage(
-    path: Path,
-    config: BenchmarkConfig,
-    models: ModelPool,
-) -> None:
-    write_json(
-        path,
-        {
-            "run_name": config.name,
-            "model_usage": models.usage_summary(),
-        },
-    )
+async def _gather_with_progress[T](
+    description: str,
+    awaitables: Iterable[Awaitable[T]],
+    total: int,
+    concurrency: int,
+) -> list[T]:
+    with _progress(description, total, "Question") as progress:
 
+        async def tracked(awaitable: Awaitable[T]) -> T:
+            try:
+                return await awaitable
+            finally:
+                progress.update()
 
-async def _tracked(awaitable: Awaitable[Any], progress: Any) -> Any:
-    try:
-        return await awaitable
-    finally:
-        progress.update()
+        return await gather_limited(
+            (tracked(awaitable) for awaitable in awaitables),
+            concurrency,
+        )
 
 
 def _model_config(section: Mapping[str, Any], name: str) -> ModelConfig:
@@ -274,10 +255,6 @@ def _model_config(section: Mapping[str, Any], name: str) -> ModelConfig:
         base_url=str(base_url) if base_url else None,
         temperature=float(section.get("temperature", 0.0)),
     )
-
-
-def _section(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
-    return _mapping(payload.get(key), key)
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
-from typing import Any, ContextManager, Iterator, cast
+from typing import Any, cast
 
 from openai import AsyncOpenAI
+
+_USAGE_FIELDS = (
+    "calls",
+    "missing_calls",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+)
 
 
 @dataclass(frozen=True)
@@ -20,49 +27,46 @@ class ChatResponse:
 
 
 class TokenUsageLedger:
-    """Small per-stage token usage accumulator."""
+    """Token usage accumulator for one model."""
 
     def __init__(self) -> None:
-        self._stage = "default"
-        self._stages: dict[str, dict[str, int]] = {}
-
-    @contextmanager
-    def stage(self, name: str) -> Iterator[None]:
-        previous = self._stage
-        self._stage = name
-        self._stages.setdefault(name, _empty_usage())
-        try:
-            yield
-        finally:
-            self._stage = previous
+        self._usage = _empty_usage()
 
     def record(self, usage: Any) -> None:
-        row = self._stages.setdefault(self._stage, _empty_usage())
-        row["calls"] += 1
+        self._usage["calls"] += 1
         if usage is None:
-            row["missing_calls"] += 1
+            self._usage["missing_calls"] += 1
             return
 
-        input_tokens = _optional_int(getattr(usage, "prompt_tokens", None))
-        output_tokens = _optional_int(getattr(usage, "completion_tokens", None))
-        total_tokens = _optional_int(getattr(usage, "total_tokens", None))
-        if total_tokens is None:
-            total_tokens = (input_tokens or 0) + (output_tokens or 0)
+        input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = getattr(usage, "total_tokens", None)
 
-        row["input_tokens"] += input_tokens or 0
-        row["output_tokens"] += output_tokens or 0
-        row["total_tokens"] += total_tokens or 0
+        self._usage["input_tokens"] += input_tokens
+        self._usage["output_tokens"] += output_tokens
+        self._usage["total_tokens"] += (
+            int(total_tokens)
+            if total_tokens is not None
+            else input_tokens + output_tokens
+        )
 
-    def summary(self) -> dict[str, Any]:
-        stages = {stage: dict(values) for stage, values in sorted(self._stages.items())}
-        total = _empty_usage()
-        for values in stages.values():
-            for key in total:
-                total[key] += int(values.get(key, 0))
-        return {"total": total, "stages": stages}
+    def summary(self) -> dict[str, int]:
+        return dict(self._usage)
 
 
-class OpenAICompatLLM:
+class _OpenAIClient:
+    def __init__(self, api_key: str, base_url: str | None = None) -> None:
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._usage = TokenUsageLedger()
+
+    def usage_summary(self) -> dict[str, int]:
+        return self._usage.summary()
+
+    async def close(self) -> None:
+        await self._client.close()
+
+
+class OpenAICompatLLM(_OpenAIClient):
     """Minimal OpenAI-compatible chat client."""
 
     def __init__(
@@ -72,10 +76,9 @@ class OpenAICompatLLM:
         base_url: str | None = None,
         temperature: float = 0.0,
     ) -> None:
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        super().__init__(api_key, base_url)
         self._model = model
         self._temperature = temperature
-        self._usage = TokenUsageLedger()
 
     async def chat(
         self,
@@ -92,29 +95,19 @@ class OpenAICompatLLM:
                 for message in messages
             ],
             "temperature": self._temperature if temperature is None else temperature,
+            **extra,
         }
-        kwargs.update(extra)
         response = await self._client.chat.completions.create(**kwargs)
         self._usage.record(getattr(response, "usage", None))
         return ChatResponse(content=response.choices[0].message.content or "")
 
-    def stage(self, name: str) -> ContextManager[None]:
-        return self._usage.stage(name)
 
-    def usage_summary(self) -> dict[str, Any]:
-        return self._usage.summary()
-
-    async def close(self) -> None:
-        await self._client.close()
-
-
-class OpenAIEmbedder:
+class OpenAIEmbedder(_OpenAIClient):
     """Minimal OpenAI-compatible embedding client."""
 
     def __init__(self, api_key: str, model: str, base_url: str | None = None) -> None:
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        super().__init__(api_key, base_url)
         self._model = model
-        self._usage = TokenUsageLedger()
 
     async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         response = await self._client.embeddings.create(
@@ -122,15 +115,6 @@ class OpenAIEmbedder:
         )
         self._usage.record(getattr(response, "usage", None))
         return [item.embedding for item in response.data]
-
-    def stage(self, name: str) -> ContextManager[None]:
-        return self._usage.stage(name)
-
-    def usage_summary(self) -> dict[str, Any]:
-        return self._usage.summary()
-
-    async def close(self) -> None:
-        await self._client.close()
 
 
 ModelClient = OpenAICompatLLM | OpenAIEmbedder
@@ -154,33 +138,20 @@ class ModelPool:
             raise KeyError(f"Embedding model '{name}' is not configured")
         return cast(OpenAIEmbedder, client)
 
-    @contextmanager
-    def stage(self, name: str) -> Iterator[None]:
-        with ExitStack() as stack:
-            for client in self._clients.values():
-                stack.enter_context(client.stage(name))
-            yield
-
-    def usage_summary(self) -> dict[str, object]:
-        return {
-            name: client.usage_summary()
-            for name, client in sorted(self._clients.items())
-        }
+    def usage_summary(self) -> dict[str, dict[str, int]]:
+        total = _empty_usage()
+        usage_by_model = {}
+        for name, client in sorted(self._clients.items()):
+            usage = client.usage_summary()
+            usage_by_model[name] = usage
+            for field in _USAGE_FIELDS:
+                total[field] += usage[field]
+        return {"total": total, **usage_by_model}
 
     async def close(self) -> None:
         for client in self._clients.values():
             await client.close()
 
 
-def _optional_int(value: Any) -> int | None:
-    return None if value is None else int(value)
-
-
 def _empty_usage() -> dict[str, int]:
-    return {
-        "calls": 0,
-        "missing_calls": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-    }
+    return dict.fromkeys(_USAGE_FIELDS, 0)
