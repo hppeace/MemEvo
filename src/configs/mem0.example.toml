@@ -1,0 +1,56 @@
+# Mem0 uses its own extraction LLM and embedder in addition to answer and judge.
+
+[run]
+name = "Mem0 Baseline on LoCoMo"
+output_dir = "runs/mem0_example"
+concurrency = 10
+
+
+[dataset]
+name = "locomo"
+path = "data/locomo10.json"
+conv_indices = "0-9"
+exclude_category = 5
+
+
+[algorithm]
+name = "mem0"
+top_k = 200
+cutoff = 10
+rerank = false
+
+
+[algorithm.config]
+version = "v1.1"
+
+[algorithm.config.llm]
+provider = "openai"
+
+[algorithm.config.llm.config]
+model = "gpt-4o-mini"
+temperature = 0.1
+api_key_env = "MEM0_LLM_API_KEY"
+
+[algorithm.config.embedder]
+provider = "openai"
+
+[algorithm.config.embedder.config]
+model = "text-embedding-3-small"
+embedding_dims = 1536
+api_key_env = "MEM0_EMBEDDING_API_KEY"
+
+
+[models.answer]
+type = "llm"
+model = "your-answer-model"
+base_url = "https://api.openai.com/v1"
+api_key_env = "ANSWER_API_KEY"
+temperature = 0.0
+
+
+[models.judge]
+type = "llm"
+model = "your-judge-model"
+base_url = "https://api.openai.com/v1"
+api_key_env = "JUDGE_API_KEY"
+temperature = 0.0

@@ -29,9 +29,30 @@ def create_algorithm(
     return factory(models, working_dir, settings)
 
 
+def _create_mem0(
+    models: ModelPool,
+    working_dir: Path,
+    settings: Mapping[str, Any],
+) -> BaseAlgorithm:
+    from memevo.algorithms.mem0 import Mem0
+
+    config = settings.get("config", {})
+    if not isinstance(config, Mapping):
+        raise ValueError("algorithm.config must be a TOML table")
+    return Mem0(
+        models.llm("answer"),
+        working_dir,
+        config,
+        top_k=int(settings.get("top_k", 200)),
+        cutoff=int(settings.get("cutoff", 10)),
+        rerank=bool(settings.get("rerank", False)),
+    )
+
+
 register_algorithm(
     "full_context",
     lambda models, working_dir, _: FullContext(models.llm("answer"), working_dir),
 )
+register_algorithm("mem0", _create_mem0)
 
 __all__ = ["BaseAlgorithm", "create_algorithm", "register_algorithm"]

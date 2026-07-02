@@ -104,14 +104,30 @@ def load_locomo(
             base_ts_ms = parse_session_timestamp(conversation[dt_key])
             msgs: list[LocomoMessage] = []
             for i, msg in enumerate(conversation[session_key]):
-                text = msg.get("text")
+                text = str(msg.get("text", ""))
+
+                # Add image description if available, copy from Mem0-Benchmarks
+                query = str(msg.get("query", ""))
+                caption = str(msg.get("blip_caption", ""))
+                if query and caption:
+                    image = (
+                        f"[Sharing image - query: {query}. The image shows: {caption}]"
+                    )
+                elif query:
+                    image = f"[Sharing image - query for: {query}]"
+                elif caption:
+                    image = f"[Sharing image that shows: {caption}]"
+                else:
+                    image = ""
+                text = " ".join(part for part in (text, image) if part)
+
                 if not text:
                     continue
                 msgs.append(
                     LocomoMessage(
                         dia_id=str(msg["dia_id"]),
                         speaker=str(msg["speaker"]),
-                        text=str(text),
+                        text=text,
                         timestamp_ms=base_ts_ms + i * 30000,
                     )
                 )
@@ -190,16 +206,20 @@ async def judge(
 
     async def judge_one(qa: dict) -> dict:
         try:
+            answer = str(qa.get("answer", ""))
+            if qa.get("category") == 3:
+                answer = answer.split(";", maxsplit=1)[0].strip()
             prompt = _JUDGE_PROMPT.format(
                 question=qa["question"],
-                answer=qa.get("answer", ""),
+                answer=answer,
                 response=qa.get("response", ""),
             )
             response = await judge_llm.chat(
                 [
                     ChatMessage(role="system", content=_JUDGE_SYSTEM_PROMPT),
                     ChatMessage(role="user", content=prompt),
-                ]
+                ],
+                response_format={"type": "json_object"},
             )
             label = _parse_label(response.content)
             return {**qa, "result": label, "judge_raw": response.content}

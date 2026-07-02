@@ -127,7 +127,7 @@ async def run_benchmark(config: BenchmarkConfig) -> dict[str, float | int]:
         for conv_index in config.conv_indices:
             conversation = dataset.load(conv_index)
             with _progress(f"Ingest Conversation {conv_index}", 1, "Step") as progress:
-                await algorithm.ingest(conv_index, conversation.messages)
+                await algorithm.ingest(conv_index, conversation)
                 progress.update()
 
             memories = await _gather_with_progress(

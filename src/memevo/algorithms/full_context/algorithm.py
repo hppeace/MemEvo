@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Sequence
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -20,10 +19,10 @@ class FullContext(BaseAlgorithm):
         self._working_dir = working_dir
         self._working_dir.mkdir(parents=True, exist_ok=True)
 
-    async def ingest(self, conv_index: int, messages: Sequence[Any]) -> None:
+    async def ingest(self, conv_index: int, conversation: Any) -> None:
         memory_file = self._memory_file(conv_index)
         memory_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = [_to_dict(message) for message in messages]
+        payload = [_to_dict(message) for message in conversation.messages]
         memory_file.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )
