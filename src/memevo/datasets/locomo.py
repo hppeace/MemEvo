@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tqdm.auto import tqdm
 
-from utils.utils import write_json
-from utils.clients import OpenAICompatLLM, ChatMessage
+from memevo.datasets.base import BaseDataset
+from memevo.utils.models import ChatMessage, ModelPool, OpenAICompatLLM
+from memevo.utils.utils import PROGRESS_FORMAT, gather_limited, write_json
+
 
 @dataclass(frozen=True)
 class LocomoMessage:
@@ -42,15 +46,44 @@ class LocomoConversation:
     sessions: list[LocomoSession]
     qa: list[LocomoQuestion]
 
+    @property
+    def messages(self) -> list[LocomoMessage]:
+        return [message for session in self.sessions for message in session.messages]
+
+
+class LocomoDataset(BaseDataset):
+    def __init__(self, path: Path, exclude_category: int | None = 5) -> None:
+        self.path = path
+        self.exclude_category = exclude_category
+
+    def load(self, conv_index: int) -> LocomoConversation:
+        return load_locomo(self.path, conv_index, self.exclude_category)
+
+    async def evaluate(
+        self,
+        models: ModelPool,
+        answers_path: Path,
+        output_path: Path,
+        concurrency: int = 32,
+    ) -> dict[str, float | int]:
+        return await judge(
+            models.llm("judge"),
+            answers_path,
+            output_path,
+            concurrency,
+        )
+
 
 def parse_session_timestamp(ts_str: str) -> int:
     dt = datetime.strptime(ts_str.strip(), "%I:%M %p on %d %B, %Y")
     return int(dt.replace(tzinfo=UTC).timestamp() * 1000)
 
 
-def load_locomo(data_path: Path, conv_index: int) -> LocomoConversation:
+def load_locomo(
+    data_path: Path, conv_index: int, exclude_category: int | None = 5
+) -> LocomoConversation:
     dataset = json.loads(data_path.read_text(encoding="utf-8"))
-    if conv_index >= len(dataset):
+    if not 0 <= conv_index < len(dataset):
         raise ValueError(
             f"conv_index {conv_index} out of range; dataset has {len(dataset)} conversations"
         )
@@ -83,10 +116,25 @@ def load_locomo(data_path: Path, conv_index: int) -> LocomoConversation:
                     )
                 )
             if msgs:
-                sessions.append(LocomoSession(session_idx=session_idx, messages=msgs))
+                sessions.append(
+                    LocomoSession(
+                        session_idx=session_idx,
+                        session_datetime=conversation[dt_key],
+                        messages=msgs,
+                    )
+                )
         session_idx += 1
 
-    qa = [q for q in conv.get("qa", []) if q.get("category") != 5]
+    qa = [
+        LocomoQuestion(
+            question=str(item["question"]),
+            answer=str(item.get("answer", "")),
+            evidence=[str(value) for value in item.get("evidence", [])],
+            category=int(item["category"]),
+        )
+        for item in conv.get("qa", [])
+        if exclude_category is None or int(item["category"]) != exclude_category
+    ]
     return LocomoConversation(
         conv_index=conv_index,
         speaker_a=speaker_a,
@@ -124,36 +172,54 @@ _JUDGE_PROMPT = """Label the generated answer as CORRECT or WRONG.
 - The answer addresses a completely different topic
 
 ## Question
-Question: {{question}}
-Gold answer: {{answer}}
-Generated answer: {{response}}
+Question: {question}
+Gold answer: {answer}
+Generated answer: {response}
 
 Return JSON with "reasoning" (one sentence) and "label" (CORRECT or WRONG). Do NOT include both labels."""
 
 
-# TODO parllelize the judge function to speed up the evaluation process
-async def judge(judge_llm: OpenAICompatLLM, answers_path: Path, output_path: Path) -> None:
+async def judge(
+    judge_llm: OpenAICompatLLM,
+    answers_path: Path,
+    output_path: Path,
+    concurrency: int = 32,
+) -> dict[str, float | int]:
     payload = json.loads(answers_path.read_text(encoding="utf-8"))
-    results = []
-    correct = 0
-    for qa in payload["qa_results"]:
-        prompt = _JUDGE_PROMPT.format(
-            question=qa["question"],
-            answer=qa.get("answer", ""),
-            response=qa.get("response", ""),
-        )
-        with judge_llm.usage_stage("Judge"):
-            resp = await judge_llm.chat(
+    questions = payload["qa_results"]
+
+    async def judge_one(qa: dict) -> dict:
+        try:
+            prompt = _JUDGE_PROMPT.format(
+                question=qa["question"],
+                answer=qa.get("answer", ""),
+                response=qa.get("response", ""),
+            )
+            response = await judge_llm.chat(
                 [
                     ChatMessage(role="system", content=_JUDGE_SYSTEM_PROMPT),
                     ChatMessage(role="user", content=prompt),
                 ]
             )
-        label = _parse_label(resp.content)
-        correct += int(label == "CORRECT")
-        results.append({**qa, "result": label, "judge_raw": resp.content})
+            label = _parse_label(response.content)
+            return {**qa, "result": label, "judge_raw": response.content}
+        finally:
+            progress.update()
+
+    with tqdm(
+        total=len(questions),
+        desc="Judge",
+        unit="Question",
+        ncols=100,
+        bar_format=PROGRESS_FORMAT,
+    ) as progress:
+        results = await gather_limited(
+            (judge_one(qa) for qa in questions),
+            concurrency,
+        )
 
     total = len(results)
+    correct = sum(item["result"] == "CORRECT" for item in results)
     metrics = {
         "total": total,
         "correct": correct,
@@ -167,6 +233,7 @@ async def judge(judge_llm: OpenAICompatLLM, answers_path: Path, output_path: Pat
             "results": results,
         },
     )
+    return metrics
 
 
 def _parse_label(text: str) -> str:

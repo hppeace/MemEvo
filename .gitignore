@@ -1,6 +1,8 @@
 # Python-generated files
 __pycache__/
 *.py[oc]
+.pytest_cache/
+.ruff_cache/
 build/
 dist/
 wheels/
@@ -11,5 +13,6 @@ wheels/
 
 # Local secrets, datasets, and generated experiment output
 .env
+/config.toml
 data/
 runs/

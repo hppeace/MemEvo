@@ -1,6 +1,5 @@
-def main():
-    print("Hello from memevo!")
+from memevo.utils.runner import cli
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(cli())
