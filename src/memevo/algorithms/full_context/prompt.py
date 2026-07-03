@@ -1,6 +1,4 @@
 from datetime import UTC, datetime
-from typing import Any
-
 
 ANSWER_PROMPT = """Use the conversation below to answer the question.
 Preserve names, numbers, specific dates, places, and other specific details. If the
@@ -14,18 +12,15 @@ Question: {question}
 Return only a concise answer."""
 
 
-def prepare_answer_prompt(memory: list[dict[str, Any]], question: str) -> str:
+def prepare_answer_prompt(memory: list[dict], question: str) -> str:
     context = "\n".join(
-        f"[{_format_timestamp(item.get('timestamp_ms'))}] "
-        f"{item.get('speaker', 'unknown')}: {item.get('text', '')}"
+        f"[{_format_timestamp(item['timestamp_ms'])}] {item['speaker']}: {item['text']}"
         for item in memory
     )
     return ANSWER_PROMPT.format(context=context, question=question)
 
 
-def _format_timestamp(timestamp_ms: Any) -> str:
-    if not isinstance(timestamp_ms, (int, float)):
-        return "unknown"
+def _format_timestamp(timestamp_ms: int) -> str:
     timestamp = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
     hour = timestamp.hour % 12 or 12
     period = "am" if timestamp.hour < 12 else "pm"

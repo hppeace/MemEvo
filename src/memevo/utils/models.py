@@ -1,157 +1,117 @@
-from __future__ import annotations
-
-from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any, cast
+import os
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any
 
 from openai import AsyncOpenAI
 
-_USAGE_FIELDS = (
-    "calls",
-    "missing_calls",
-    "input_tokens",
-    "output_tokens",
-    "total_tokens",
-)
+_FIELDS = ("calls", "missing_calls", "input_tokens", "output_tokens", "total_tokens")
+_STAGE: ContextVar[str] = ContextVar("stage", default="unscoped")
 
 
-@dataclass(frozen=True)
-class ChatMessage:
-    role: str
-    content: str
+def _empty() -> dict[str, int]:
+    return dict.fromkeys(_FIELDS, 0)
 
 
-@dataclass(frozen=True)
-class ChatResponse:
-    content: str
+class Usage:
+    """Token usage grouped by configured model and benchmark stage."""
 
+    def __init__(self, model_names: Iterable[str] = ()) -> None:
+        self._models = {name: _empty() for name in model_names}
+        self._stages: dict[str, dict[str, int]] = {}
 
-class TokenUsageLedger:
-    """Token usage accumulator for one model."""
+    @contextmanager
+    def stage(self, name: str) -> Iterator[None]:
+        self._stages.setdefault(name, _empty())
+        token = _STAGE.set(name)
+        try:
+            yield
+        finally:
+            _STAGE.reset(token)
 
-    def __init__(self) -> None:
-        self._usage = _empty_usage()
-
-    def record(self, usage: Any) -> None:
-        self._usage["calls"] += 1
-        if usage is None:
-            self._usage["missing_calls"] += 1
-            return
-
+    def record(self, model: str, usage: Any) -> None:
+        rows = (
+            self._models.setdefault(model, _empty()),
+            self._stages.setdefault(_STAGE.get(), _empty()),
+        )
         input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        total_tokens = getattr(usage, "total_tokens", None)
-
-        self._usage["input_tokens"] += input_tokens
-        self._usage["output_tokens"] += output_tokens
-        self._usage["total_tokens"] += (
-            int(total_tokens)
-            if total_tokens is not None
-            else input_tokens + output_tokens
+        total_tokens = int(
+            getattr(usage, "total_tokens", 0) or input_tokens + output_tokens
         )
+        for row in rows:
+            row["calls"] += 1
+            if usage is None:
+                row["missing_calls"] += 1
+                continue
+            row["input_tokens"] += input_tokens
+            row["output_tokens"] += output_tokens
+            row["total_tokens"] += total_tokens
 
-    def summary(self) -> dict[str, int]:
-        return dict(self._usage)
+    def summary(self) -> dict[str, Any]:
+        total = {
+            field: sum(row[field] for row in self._models.values()) for field in _FIELDS
+        }
+        return {
+            "total": total,
+            **{name: dict(row) for name, row in sorted(self._models.items())},
+            "stages": {name: dict(row) for name, row in sorted(self._stages.items())},
+        }
 
 
-class _OpenAIClient:
-    def __init__(self, api_key: str, base_url: str | None = None) -> None:
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-        self._usage = TokenUsageLedger()
-
-    def usage_summary(self) -> dict[str, int]:
-        return self._usage.summary()
-
-    async def close(self) -> None:
-        await self._client.close()
-
-
-class OpenAICompatLLM(_OpenAIClient):
-    """Minimal OpenAI-compatible chat client."""
-
+class _Model:
     def __init__(
         self,
-        api_key: str,
-        model: str,
-        base_url: str | None = None,
-        temperature: float = 0.0,
+        name: str,
+        config: Mapping[str, Any],
+        usage: Usage,
     ) -> None:
-        super().__init__(api_key, base_url)
-        self._model = model
-        self._temperature = temperature
+        self.name = name
+        self.model = str(config["model"])
+        self.options = dict(config.get("options", {}))
+        self.usage = usage
+        self.client = AsyncOpenAI(
+            api_key=os.environ[str(config["api_key_env"])],
+            base_url=config.get("base_url"),
+        )
+
+    async def close(self) -> None:
+        await self.client.close()
+
+
+class LLM(_Model):
+    """Small async client for OpenAI-compatible chat APIs."""
 
     async def chat(
         self,
-        messages: list[ChatMessage],
-        *,
-        model: str | None = None,
-        temperature: float | None = None,
-        **extra: Any,
-    ) -> ChatResponse:
-        kwargs: dict[str, Any] = {
-            "model": model or self._model,
-            "messages": [
-                {"role": message.role, "content": message.content}
-                for message in messages
-            ],
-            "temperature": self._temperature if temperature is None else temperature,
-            **extra,
-        }
-        response = await self._client.chat.completions.create(**kwargs)
-        self._usage.record(getattr(response, "usage", None))
-        return ChatResponse(content=response.choices[0].message.content or "")
-
-
-class OpenAIEmbedder(_OpenAIClient):
-    """Minimal OpenAI-compatible embedding client."""
-
-    def __init__(self, api_key: str, model: str, base_url: str | None = None) -> None:
-        super().__init__(api_key, base_url)
-        self._model = model
-
-    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
-        response = await self._client.embeddings.create(
-            model=self._model, input=list(texts)
+        messages: Sequence[Mapping[str, Any]],
+        **options: Any,
+    ) -> str:
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=list(messages),
+            **(self.options | options),
         )
-        self._usage.record(getattr(response, "usage", None))
-        return [item.embedding for item in response.data]
+        self.usage.record(self.name, response.usage)
+        return response.choices[0].message.content or ""
 
 
-ModelClient = OpenAICompatLLM | OpenAIEmbedder
+class Embedder(_Model):
+    """Small async client for OpenAI-compatible embedding APIs."""
 
-
-class ModelPool:
-    """Named model clients with shared experiment-stage accounting."""
-
-    def __init__(self, clients: dict[str, ModelClient]) -> None:
-        self._clients = clients
-
-    def llm(self, name: str) -> OpenAICompatLLM:
-        client = self._clients.get(name)
-        if client is None:
-            raise KeyError(f"LLM model '{name}' is not configured")
-        return cast(OpenAICompatLLM, client)
-
-    def embedder(self, name: str) -> OpenAIEmbedder:
-        client = self._clients.get(name)
-        if client is None:
-            raise KeyError(f"Embedding model '{name}' is not configured")
-        return cast(OpenAIEmbedder, client)
-
-    def usage_summary(self) -> dict[str, dict[str, int]]:
-        total = _empty_usage()
-        usage_by_model = {}
-        for name, client in sorted(self._clients.items()):
-            usage = client.usage_summary()
-            usage_by_model[name] = usage
-            for field in _USAGE_FIELDS:
-                total[field] += usage[field]
-        return {"total": total, **usage_by_model}
-
-    async def close(self) -> None:
-        for client in self._clients.values():
-            await client.close()
-
-
-def _empty_usage() -> dict[str, int]:
-    return dict.fromkeys(_USAGE_FIELDS, 0)
+    async def embed(
+        self,
+        texts: Sequence[str],
+        **options: Any,
+    ) -> list[list[float]]:
+        response = await self.client.embeddings.create(
+            model=self.model,
+            input=list(texts),
+            **(self.options | options),
+        )
+        self.usage.record(self.name, response.usage)
+        return [
+            item.embedding
+            for item in sorted(response.data, key=lambda item: item.index)
+        ]

@@ -1,33 +1,58 @@
-from __future__ import annotations
-
-import copy
+import asyncio
+import logging
 import os
 import uuid
-from collections.abc import Mapping
+import warnings
+from collections.abc import Coroutine, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault("MEM0_TELEMETRY", "false")
+
 from mem0 import AsyncMemory
 
-from memevo.algorithms.base import BaseAlgorithm
 from memevo.algorithms.mem0.prompt import prepare_answer_prompt
-from memevo.utils.models import ChatMessage, OpenAICompatLLM
+from memevo.utils.models import Embedder, LLM
+
+logging.getLogger("mem0.vector_stores.qdrant").setLevel(logging.ERROR)
+warnings.filterwarnings(
+    "ignore",
+    message="Payload indexes have no effect in the local Qdrant.*",
+)
 
 
-class Mem0(BaseAlgorithm):
+class Mem0:
     """Mem0 OSS adapter for conversational-memory experiments."""
 
     def __init__(
         self,
-        answer_llm: OpenAICompatLLM,
+        answer_llm: LLM,
+        memory_llm: LLM,
+        embedder: Embedder,
         working_dir: Path,
         memory_config: Mapping[str, Any],
         top_k: int = 200,
         cutoff: int = 10,
         rerank: bool = False,
+        embedding_dims: int = 1536,
     ) -> None:
         working_dir.mkdir(parents=True, exist_ok=True)
-        config = copy.deepcopy(dict(memory_config))
+        config = dict(memory_config)
+        config["llm"] = {
+            "provider": "openai",
+            "config": {
+                "model": "unused",
+                "api_key": "unused",
+            },
+        }
+        config["embedder"] = {
+            "provider": "openai",
+            "config": {
+                "model": "unused",
+                "embedding_dims": embedding_dims,
+                "api_key": "unused",
+            },
+        }
         config.setdefault("history_db_path", str(working_dir / "history.db"))
         config.setdefault(
             "vector_store",
@@ -36,15 +61,19 @@ class Mem0(BaseAlgorithm):
                 "config": {
                     "path": str(working_dir / "qdrant"),
                     "collection_name": "memevo_mem0",
+                    "embedding_model_dims": embedding_dims,
                 },
             },
         )
+        loop = asyncio.get_running_loop()
         self._memory = AsyncMemory.from_config(_resolve_env(config))
+        self._memory.llm = _Mem0LLM(memory_llm, loop)
+        self._memory.embedding_model = _Mem0Embedder(embedder, loop)
         self._answer_llm = answer_llm
+        self._clients = (answer_llm, memory_llm, embedder)
         self._top_k = top_k
         self._cutoff = cutoff
         self._rerank = rerank
-        self.reset_all()
 
     async def ingest(self, conv_index: int, conversation: Any) -> None:
         user_id = self._user_id(conv_index)
@@ -76,31 +105,27 @@ class Mem0(BaseAlgorithm):
             top_k=self._top_k,
             rerank=self._rerank,
         )
-        results = (
-            response.get("results", []) if isinstance(response, dict) else response
-        )
+        results = response["results"]
         return {
-            "results": sorted(
-                results, key=lambda item: item.get("score", 0), reverse=True
-            ),
-            "reference_date": self._reference_dates.get(conv_index),
+            "results": sorted(results, key=lambda item: item["score"], reverse=True),
+            "reference_date": self._reference_dates[conv_index],
         }
 
     async def answer(self, question: str, memory: Any) -> str:
         memories = memory["results"][: self._cutoff]
         response = await self._answer_llm.chat(
             [
-                ChatMessage(
-                    role="user",
-                    content=prepare_answer_prompt(
+                {
+                    "role": "user",
+                    "content": prepare_answer_prompt(
                         memories,
                         question,
                         memory["reference_date"],
                     ),
-                )
+                }
             ]
         )
-        answer = response.content.strip()
+        answer = response.strip()
         return answer.rsplit("ANSWER:", 1)[-1].strip()
 
     def reset_all(self) -> None:
@@ -110,17 +135,62 @@ class Mem0(BaseAlgorithm):
     def _user_id(self, conv_index: int) -> str:
         return f"locomo_{conv_index}_{self._run_id}"
 
+    async def close(self) -> None:
+        for client in self._clients:
+            await client.close()
+
+
+class _Mem0LLM:
+    def __init__(
+        self,
+        client: LLM,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self._client = client
+        self._loop = loop
+
+    def generate_response(self, messages: list[dict[str, str]], **options: Any) -> str:
+        return _run(
+            self._loop,
+            self._client.chat(messages, **options),
+        )
+
+
+class _Mem0Embedder:
+    def __init__(self, client: Embedder, loop: asyncio.AbstractEventLoop) -> None:
+        self._client = client
+        self._loop = loop
+
+    def embed(self, text: str, memory_action: str | None = None) -> list[float]:
+        return self.embed_batch([text], memory_action)[0]
+
+    def embed_batch(
+        self, texts: Sequence[str], memory_action: str | None = None
+    ) -> list[list[float]]:
+        texts = [text.replace("\n", " ") for text in texts]
+        return [
+            vector
+            for start in range(0, len(texts), 100)
+            for vector in _run(
+                self._loop,
+                self._client.embed(texts[start : start + 100]),
+            )
+        ]
+
+
+def _run[T](
+    loop: asyncio.AbstractEventLoop,
+    coroutine: Coroutine[Any, Any, T],
+) -> T:
+    return asyncio.run_coroutine_threadsafe(coroutine, loop).result()
+
 
 def _resolve_env(value: Any) -> Any:
     if isinstance(value, dict):
         resolved = {}
         for key, item in value.items():
             if key.endswith("_env"):
-                env_name = str(item)
-                env_value = os.getenv(env_name)
-                if not env_value:
-                    raise ValueError(f"Environment variable {env_name} is required")
-                resolved[key.removesuffix("_env")] = env_value
+                resolved[key.removesuffix("_env")] = os.environ[str(item)]
             else:
                 resolved[key] = _resolve_env(item)
         return resolved

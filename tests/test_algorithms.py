@@ -5,8 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import memevo.algorithms.mem0.algorithm as mem0_algorithm
 from memevo.algorithms.full_context import FullContext
 from memevo.algorithms.mem0 import Mem0
+from memevo.algorithms.mem0.algorithm import _Mem0Embedder, _Mem0LLM
 from memevo.datasets.locomo import judge
 
 
@@ -36,8 +38,8 @@ class FakeLLM:
         self.prompt = ""
 
     async def chat(self, messages: list[Any]) -> Any:
-        self.prompt = messages[0].content
-        return SimpleNamespace(content="ANSWER: Done")
+        self.prompt = messages[0]["content"]
+        return "ANSWER: Done"
 
 
 class FakeJudge:
@@ -46,9 +48,105 @@ class FakeJudge:
         self.options: dict[str, Any] = {}
 
     async def chat(self, messages: list[Any], **options: Any) -> Any:
-        self.prompt = messages[1].content
+        self.prompt = messages[1]["content"]
         self.options = options
-        return SimpleNamespace(content='{"reasoning": "matches", "label": "CORRECT"}')
+        return '{"reasoning": "matches", "label": "CORRECT"}'
+
+
+class SharedLLM:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[Any], dict[str, Any]]] = []
+
+    async def chat(self, messages: list[Any], **options: Any) -> str:
+        self.calls.append((messages, options))
+        return '{"memory": []}'
+
+
+class SharedEmbedder:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return [[float(index)] for index, _ in enumerate(texts)]
+
+
+def test_mem0_injects_shared_models(monkeypatch: Any, tmp_path: Path) -> None:
+    class ConfiguredLLM(SharedLLM):
+        model = "memory-model"
+        temperature = 0.1
+        max_tokens = 2000
+        top_p = 0.1
+
+    class ConfiguredEmbedder(SharedEmbedder):
+        pass
+
+    memory = SimpleNamespace(llm=None, embedding_model=None)
+    captured: dict[str, Any] = {}
+
+    def from_config(config: dict[str, Any]) -> Any:
+        captured.update(config)
+        return memory
+
+    monkeypatch.setattr(
+        mem0_algorithm.AsyncMemory,
+        "from_config",
+        staticmethod(from_config),
+    )
+    answer_llm = ConfiguredLLM()
+    memory_llm = ConfiguredLLM()
+
+    async def build() -> None:
+        Mem0(
+            answer_llm,
+            memory_llm,
+            ConfiguredEmbedder(),
+            tmp_path,
+            {"version": "v1.1"},
+            embedding_dims=3,
+        )
+        await asyncio.to_thread(
+            memory.llm.generate_response,
+            [{"role": "user", "content": "remember"}],
+            response_format={"type": "json_object"},
+        )
+
+    asyncio.run(build())
+
+    assert isinstance(memory.llm, _Mem0LLM)
+    assert isinstance(memory.embedding_model, _Mem0Embedder)
+    assert captured["llm"]["config"]["model"] == "unused"
+    assert captured["embedder"]["config"]["embedding_dims"] == 3
+    assert captured["vector_store"]["config"]["embedding_model_dims"] == 3
+    assert memory_llm.calls[0][1] == {"response_format": {"type": "json_object"}}
+
+
+def test_mem0_model_adapters_delegate_to_shared_clients() -> None:
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        llm = SharedLLM()
+        embedder = SharedEmbedder()
+        llm_adapter = _Mem0LLM(llm, loop)
+        embedder_adapter = _Mem0Embedder(embedder, loop)
+
+        response = await asyncio.to_thread(
+            llm_adapter.generate_response,
+            [{"role": "user", "content": "Remember this"}],
+            response_format={"type": "json_object"},
+        )
+        embeddings = await asyncio.to_thread(
+            embedder_adapter.embed_batch,
+            ["first", "second"],
+            "add",
+        )
+
+        assert response == '{"memory": []}'
+        assert llm.calls[0][0][0]["content"] == "Remember this"
+        assert llm.calls[0][1] == {"response_format": {"type": "json_object"}}
+        assert embedder.calls == [["first", "second"]]
+        assert embeddings == [[0.0], [1.0]]
+
+    asyncio.run(run())
 
 
 def test_mem0_ingests_official_locomo_message_shape() -> None:
@@ -133,7 +231,7 @@ def test_full_context_accepts_complete_conversation(tmp_path: Path) -> None:
 
     asyncio.run(algorithm.ingest(0, conversation))
 
-    assert asyncio.run(algorithm.retrieve(0)) == [
+    assert asyncio.run(algorithm.retrieve(0, "")) == [
         {"speaker": "Caroline", "text": "Hello"}
     ]
 

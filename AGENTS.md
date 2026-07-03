@@ -5,9 +5,9 @@
 MemEvo is an early-stage Python 3.12 project for evaluating conversational memory algorithms.
 
 - `main.py` is the current executable entry point.
-- `src/memevo/algorithms/` contains memory implementations. Shared interfaces belong in `base/`; each algorithm should have its own subpackage.
+- `src/memevo/algorithms/` contains memory implementations; each algorithm subpackage exposes `create(settings, models, usage, working_dir)`.
 - `src/memevo/datasets/` contains dataset loaders and evaluation logic, including LoCoMo support.
-- `src/memevo/utils/` provides LLM clients, run helpers, and serialization utilities.
+- `src/memevo/utils/` contains model clients, usage tracking, progress handling, and the runner.
 - `src/configs/` stores example TOML run configurations. Keep generated results under `runs/` and datasets under `data/`; do not commit large artifacts.
 
 Tests live under `tests/`; mirror source areas when adding coverage (for example, `tests/test_locomo.py`).
@@ -32,11 +32,11 @@ Follow PEP 8 with four-space indentation, explicit type hints, and `pathlib.Path
 
 ## Testing Guidelines
 
-Use `pytest`; run it with `uv run pytest`. Name files `test_*.py` and tests `test_<behavior>`. Cover parsing edge cases, missing files, async client behavior, and algorithm ingest/retrieve/reset contracts. Mock external LLM calls; unit tests must not require API keys or network access.
+Use `pytest`; run it with `uv run pytest`. Name files `test_*.py` and tests `test_<behavior>`. Cover dataset parsing, async model behavior, usage accounting, and algorithm ingest/retrieve/reset contracts. Mock external LLM calls; unit tests must not require API keys or network access.
 
 ## Commit & Pull Request Guidelines
 
-This repository has no commit history yet. Use short, imperative subjects such as `Add LoCoMo timestamp tests`, optionally with Conventional Commit prefixes (`feat:`, `fix:`, `test:`). Pull requests should explain the change, list validation commands, link relevant issues, and include sample output for benchmark or configuration changes. Keep unrelated refactors separate.
+Follow the existing Conventional Commit style (`feat:`, `fix:`, `refactor:`, `test:`) with a short, imperative subject. Pull requests should explain the change, list validation commands, link relevant issues, and include sample output for benchmark or configuration changes. Keep unrelated refactors separate.
 
 ## Security & Configuration
 

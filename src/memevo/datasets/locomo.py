@@ -1,23 +1,19 @@
 """LoCoMo dataset"""
 
-from __future__ import annotations
-
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from tqdm.auto import tqdm
-
-from memevo.datasets.base import BaseDataset
-from memevo.utils.models import ChatMessage, ModelPool, OpenAICompatLLM
-from memevo.utils.utils import PROGRESS_FORMAT, gather_limited, write_json
+from memevo.utils.models import LLM, Usage
+from memevo.utils.progress import gather
 
 
 @dataclass(frozen=True)
 class LocomoMessage:
-    dia_id: str
     speaker: str
     text: str
     timestamp_ms: int
@@ -25,7 +21,6 @@ class LocomoMessage:
 
 @dataclass(frozen=True)
 class LocomoSession:
-    session_idx: int
     session_datetime: str
     messages: list[LocomoMessage]
 
@@ -40,9 +35,7 @@ class LocomoQuestion:
 
 @dataclass(frozen=True)
 class LocomoConversation:
-    conv_index: int
     speaker_a: str
-    speaker_b: str
     sessions: list[LocomoSession]
     qa: list[LocomoQuestion]
 
@@ -51,47 +44,81 @@ class LocomoConversation:
         return [message for session in self.sessions for message in session.messages]
 
 
-class LocomoDataset(BaseDataset):
-    def __init__(self, path: Path, exclude_category: int | None = 5) -> None:
+class LocomoDataset:
+    def __init__(
+        self,
+        path: Path,
+        indices: Sequence[int],
+        judge_llm: LLM,
+        exclude_category: int | None = 5,
+    ) -> None:
         self.path = path
+        self.indices = indices
+        self.judge_llm = judge_llm
         self.exclude_category = exclude_category
 
     def load(self, conv_index: int) -> LocomoConversation:
         return load_locomo(self.path, conv_index, self.exclude_category)
 
+    def questions(self, conversation: LocomoConversation) -> list[LocomoQuestion]:
+        return conversation.qa
+
+    def question_text(self, question: LocomoQuestion) -> str:
+        return question.question
+
+    def result(
+        self,
+        conv_index: int,
+        question: LocomoQuestion,
+        response: str,
+    ) -> dict[str, Any]:
+        return {
+            "conv_index": conv_index,
+            "question": question.question,
+            "answer": question.answer,
+            "response": response,
+            "category": question.category,
+            "evidence": question.evidence,
+        }
+
     async def evaluate(
         self,
-        models: ModelPool,
         answers_path: Path,
         output_path: Path,
         concurrency: int = 32,
     ) -> dict[str, float | int]:
         return await judge(
-            models.llm("judge"),
+            self.judge_llm,
             answers_path,
             output_path,
             concurrency,
         )
 
+    async def close(self) -> None:
+        await self.judge_llm.close()
 
-def parse_session_timestamp(ts_str: str) -> int:
-    dt = datetime.strptime(ts_str.strip(), "%I:%M %p on %d %B, %Y")
-    return int(dt.replace(tzinfo=UTC).timestamp() * 1000)
+
+def create(
+    settings: Mapping[str, Any],
+    models: Mapping[str, Any],
+    usage: Usage,
+) -> LocomoDataset:
+    exclude = settings.get("exclude_category", 5)
+    return LocomoDataset(
+        path=Path(str(settings["path"])),
+        indices=list(settings["conv_indices"]),
+        judge_llm=LLM("judge", models["judge"], usage),
+        exclude_category=None if exclude is None else int(exclude),
+    )
 
 
 def load_locomo(
     data_path: Path, conv_index: int, exclude_category: int | None = 5
 ) -> LocomoConversation:
     dataset = json.loads(data_path.read_text(encoding="utf-8"))
-    if not 0 <= conv_index < len(dataset):
-        raise ValueError(
-            f"conv_index {conv_index} out of range; dataset has {len(dataset)} conversations"
-        )
-
     conv = dataset[conv_index]
     conversation = conv["conversation"]
     speaker_a = conversation["speaker_a"]
-    speaker_b = conversation["speaker_b"]
 
     sessions: list[LocomoSession] = []
     session_idx = 1
@@ -101,7 +128,11 @@ def load_locomo(
         if dt_key not in conversation:
             break
         if session_key in conversation:
-            base_ts_ms = parse_session_timestamp(conversation[dt_key])
+            session_time = datetime.strptime(
+                conversation[dt_key].strip(),
+                "%I:%M %p on %d %B, %Y",
+            )
+            base_ts_ms = int(session_time.replace(tzinfo=UTC).timestamp() * 1000)
             msgs: list[LocomoMessage] = []
             for i, msg in enumerate(conversation[session_key]):
                 text = str(msg.get("text", ""))
@@ -125,7 +156,6 @@ def load_locomo(
                     continue
                 msgs.append(
                     LocomoMessage(
-                        dia_id=str(msg["dia_id"]),
                         speaker=str(msg["speaker"]),
                         text=text,
                         timestamp_ms=base_ts_ms + i * 30000,
@@ -134,7 +164,6 @@ def load_locomo(
             if msgs:
                 sessions.append(
                     LocomoSession(
-                        session_idx=session_idx,
                         session_datetime=conversation[dt_key],
                         messages=msgs,
                     )
@@ -152,9 +181,7 @@ def load_locomo(
         if exclude_category is None or int(item["category"]) != exclude_category
     ]
     return LocomoConversation(
-        conv_index=conv_index,
         speaker_a=speaker_a,
-        speaker_b=speaker_b,
         sessions=sessions,
         qa=qa,
     )
@@ -196,7 +223,7 @@ Return JSON with "reasoning" (one sentence) and "label" (CORRECT or WRONG). Do N
 
 
 async def judge(
-    judge_llm: OpenAICompatLLM,
+    judge_llm: LLM,
     answers_path: Path,
     output_path: Path,
     concurrency: int = 32,
@@ -205,38 +232,25 @@ async def judge(
     questions = payload["qa_results"]
 
     async def judge_one(qa: dict) -> dict:
-        try:
-            answer = str(qa.get("answer", ""))
-            if qa.get("category") == 3:
-                answer = answer.split(";", maxsplit=1)[0].strip()
-            prompt = _JUDGE_PROMPT.format(
-                question=qa["question"],
-                answer=answer,
-                response=qa.get("response", ""),
-            )
-            response = await judge_llm.chat(
-                [
-                    ChatMessage(role="system", content=_JUDGE_SYSTEM_PROMPT),
-                    ChatMessage(role="user", content=prompt),
-                ],
-                response_format={"type": "json_object"},
-            )
-            label = _parse_label(response.content)
-            return {**qa, "result": label, "judge_raw": response.content}
-        finally:
-            progress.update()
-
-    with tqdm(
-        total=len(questions),
-        desc="Judge",
-        unit="Question",
-        ncols=100,
-        bar_format=PROGRESS_FORMAT,
-    ) as progress:
-        results = await gather_limited(
-            (judge_one(qa) for qa in questions),
-            concurrency,
+        answer = str(qa.get("answer", ""))
+        if qa.get("category") == 3:
+            answer = answer.split(";", maxsplit=1)[0].strip()
+        prompt = _JUDGE_PROMPT.format(
+            question=qa["question"],
+            answer=answer,
+            response=qa.get("response", ""),
         )
+        response = await judge_llm.chat(
+            [
+                {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        label = _parse_label(response)
+        return {**qa, "result": label, "judge_raw": response}
+
+    results = await gather("Judge", (judge_one(qa) for qa in questions), concurrency)
 
     total = len(results)
     correct = sum(item["result"] == "CORRECT" for item in results)
@@ -245,12 +259,13 @@ async def judge(
         "correct": correct,
         "accuracy": correct / total if total else 0.0,
     }
-    write_json(
-        output_path,
-        {
-            "metrics": metrics,
-            "results": results,
-        },
+    output_path.write_text(
+        json.dumps(
+            {"metrics": metrics, "results": results},
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
     )
     return metrics
 
