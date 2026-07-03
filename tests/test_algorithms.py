@@ -54,12 +54,13 @@ class FakeJudge:
 
 
 class SharedLLM:
-    def __init__(self) -> None:
+    def __init__(self, response: str = '{"memory": []}') -> None:
         self.calls: list[tuple[list[Any], dict[str, Any]]] = []
+        self.response = response
 
     async def chat(self, messages: list[Any], **options: Any) -> str:
         self.calls.append((messages, options))
-        return '{"memory": []}'
+        return self.response
 
 
 class SharedEmbedder:
@@ -159,27 +160,16 @@ def test_mem0_model_adapters_delegate_to_shared_clients() -> None:
     asyncio.run(run())
 
 
-def test_mem0_llm_retries_invalid_json() -> None:
+def test_mem0_llm_retries_invalid_schema() -> None:
     async def run() -> None:
-        messages = [{"role": "user", "content": "Remember this"}]
-        llm = RetryLLM('{"memory": [}', '{"memory": []}')
+        llm = RetryLLM('{"memory": [}', '{"memory": ["bad"]}', '{"memory": []}')
         adapter = _Mem0LLM(llm, asyncio.get_running_loop())
         response = await asyncio.to_thread(
             adapter.generate_response,
-            messages,
+            [{"role": "user", "content": "Remember this"}],
             response_format={"type": "json_object"},
         )
         assert response == '{"memory": []}'
-        assert len(llm.calls) == 2
-
-        llm = RetryLLM("", "", "")
-        adapter = _Mem0LLM(llm, asyncio.get_running_loop())
-        response = await asyncio.to_thread(
-            adapter.generate_response,
-            messages,
-            response_format={"type": "json_object"},
-        )
-        assert response == ""
         assert len(llm.calls) == 3
 
     asyncio.run(run())

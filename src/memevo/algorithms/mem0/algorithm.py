@@ -154,14 +154,11 @@ class _Mem0LLM:
     def generate_response(self, messages: list[dict[str, str]], **options: Any) -> str:
         for _ in range(3):
             response = _run(self._loop, self._client.chat(messages, **options))
-            if options.get("response_format", {}).get("type") != "json_object":
+            if options.get("response_format", {}).get(
+                "type"
+            ) != "json_object" or _valid_memory_json(response):
                 return response
-            try:
-                json.loads(extract_json(remove_code_blocks(response)), strict=False)
-                return response
-            except json.JSONDecodeError:
-                pass
-        return response
+        return '{"memory": []}'
 
 
 class _Mem0Embedder:
@@ -191,6 +188,17 @@ def _run[T](
     coroutine: Coroutine[Any, Any, T],
 ) -> T:
     return asyncio.run_coroutine_threadsafe(coroutine, loop).result()
+
+
+def _valid_memory_json(response: str) -> bool:
+    try:
+        data = json.loads(extract_json(remove_code_blocks(response)), strict=False)
+        memory = data.get("memory", []) if isinstance(data, dict) else None
+        return isinstance(memory, list) and all(
+            isinstance(item, dict) for item in memory
+        )
+    except (json.JSONDecodeError, TypeError):
+        return False
 
 
 def _resolve_env(value: Any) -> Any:
