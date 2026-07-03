@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -10,9 +11,11 @@ from typing import Any
 os.environ.setdefault("MEM0_TELEMETRY", "false")
 
 from mem0 import AsyncMemory
+from mem0.memory.utils import extract_json, remove_code_blocks
 
 from memevo.algorithms.mem0.prompt import prepare_answer_prompt
 from memevo.utils.models import Embedder, LLM
+from memevo.utils.progress import progress
 
 logging.getLogger("mem0.vector_stores.qdrant").setLevel(logging.ERROR)
 warnings.filterwarnings(
@@ -82,21 +85,24 @@ class Mem0:
         )
         if sessions:
             self._reference_dates[conv_index] = sessions[-1].session_datetime
-        for session in sessions:
-            for message in session.messages:
-                await self._memory.add(
-                    messages=[
-                        {
-                            "role": (
-                                "user"
-                                if message.speaker == conversation.speaker_a
-                                else "assistant"
-                            ),
-                            "content": f"{message.speaker}: {message.text}",
-                        }
-                    ],
-                    user_id=user_id,
-                )
+        total = sum(len(session.messages) for session in sessions)
+        with progress("Ingest", total, "Turn") as bar:
+            for session in sessions:
+                for message in session.messages:
+                    await self._memory.add(
+                        messages=[
+                            {
+                                "role": (
+                                    "user"
+                                    if message.speaker == conversation.speaker_a
+                                    else "assistant"
+                                ),
+                                "content": f"{message.speaker}: {message.text}",
+                            }
+                        ],
+                        user_id=user_id,
+                    )
+                    bar.update()
 
     async def retrieve(self, conv_index: int, question: str) -> dict[str, Any]:
         response = await self._memory.search(
@@ -141,19 +147,21 @@ class Mem0:
 
 
 class _Mem0LLM:
-    def __init__(
-        self,
-        client: LLM,
-        loop: asyncio.AbstractEventLoop,
-    ) -> None:
+    def __init__(self, client: LLM, loop: asyncio.AbstractEventLoop) -> None:
         self._client = client
         self._loop = loop
 
     def generate_response(self, messages: list[dict[str, str]], **options: Any) -> str:
-        return _run(
-            self._loop,
-            self._client.chat(messages, **options),
-        )
+        for _ in range(3):
+            response = _run(self._loop, self._client.chat(messages, **options))
+            if options.get("response_format", {}).get("type") != "json_object":
+                return response
+            try:
+                json.loads(extract_json(remove_code_blocks(response)), strict=False)
+                return response
+            except json.JSONDecodeError:
+                pass
+        return response
 
 
 class _Mem0Embedder:

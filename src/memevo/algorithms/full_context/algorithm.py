@@ -6,6 +6,7 @@ from typing import Any
 
 from memevo.algorithms.full_context.prompt import prepare_answer_prompt
 from memevo.utils.models import LLM
+from memevo.utils.progress import progress
 
 
 class FullContext:
@@ -16,15 +17,17 @@ class FullContext:
         self._working_dir = working_dir
 
     async def ingest(self, conv_index: int, conversation: Any) -> None:
-        memory_file = self._memory_file(conv_index)
-        memory_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = [
-            asdict(message) if is_dataclass(message) else message
-            for message in conversation.messages
-        ]
-        memory_file.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        with progress("Ingest", 1, "Step") as bar:
+            memory_file = self._memory_file(conv_index)
+            memory_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = [
+                asdict(message) if is_dataclass(message) else message
+                for message in conversation.messages
+            ]
+            memory_file.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            bar.update()
 
     async def retrieve(self, conv_index: int, question: str) -> list[dict[str, Any]]:
         memory_file = self._memory_file(conv_index)

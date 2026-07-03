@@ -71,6 +71,16 @@ class SharedEmbedder:
         return [[float(index)] for index, _ in enumerate(texts)]
 
 
+class RetryLLM(SharedLLM):
+    def __init__(self, *responses: str) -> None:
+        super().__init__()
+        self.responses = list(responses)
+
+    async def chat(self, messages: list[Any], **options: Any) -> str:
+        self.calls.append((messages, options))
+        return self.responses.pop(0)
+
+
 def test_mem0_injects_shared_models(monkeypatch: Any, tmp_path: Path) -> None:
     class ConfiguredLLM(SharedLLM):
         model = "memory-model"
@@ -145,6 +155,32 @@ def test_mem0_model_adapters_delegate_to_shared_clients() -> None:
         assert llm.calls[0][1] == {"response_format": {"type": "json_object"}}
         assert embedder.calls == [["first", "second"]]
         assert embeddings == [[0.0], [1.0]]
+
+    asyncio.run(run())
+
+
+def test_mem0_llm_retries_invalid_json() -> None:
+    async def run() -> None:
+        messages = [{"role": "user", "content": "Remember this"}]
+        llm = RetryLLM('{"memory": [}', '{"memory": []}')
+        adapter = _Mem0LLM(llm, asyncio.get_running_loop())
+        response = await asyncio.to_thread(
+            adapter.generate_response,
+            messages,
+            response_format={"type": "json_object"},
+        )
+        assert response == '{"memory": []}'
+        assert len(llm.calls) == 2
+
+        llm = RetryLLM("", "", "")
+        adapter = _Mem0LLM(llm, asyncio.get_running_loop())
+        response = await asyncio.to_thread(
+            adapter.generate_response,
+            messages,
+            response_format={"type": "json_object"},
+        )
+        assert response == ""
+        assert len(llm.calls) == 3
 
     asyncio.run(run())
 

@@ -10,7 +10,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from memevo.utils.models import Usage
-from memevo.utils.progress import gather, progress
+from memevo.utils.progress import gather
 
 
 async def run_benchmark(config: Mapping[str, Any]) -> dict[str, float | int]:
@@ -47,10 +47,8 @@ async def run_benchmark(config: Mapping[str, Any]) -> dict[str, float | int]:
             questions = dataset.questions(conversation)
             queries = [dataset.question_text(item) for item in questions]
 
-            with progress("Ingest", 1, "Step") as ingest_bar:
-                with usage.stage("ingest"):
-                    await algorithm.ingest(conv_index, conversation)
-                ingest_bar.update()
+            with usage.stage("ingest"):
+                await algorithm.ingest(conv_index, conversation)
 
             with usage.stage("retrieve"):
                 memories = await gather(

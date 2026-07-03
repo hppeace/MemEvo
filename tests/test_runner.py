@@ -1,6 +1,5 @@
 import asyncio
 import json
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -96,11 +95,6 @@ def test_runner_only_orchestrates_stages_and_results(
         )
 
     monkeypatch.setattr(runner, "import_module", import_component)
-    monkeypatch.setattr(
-        runner,
-        "progress",
-        lambda *_: nullcontext(SimpleNamespace(update=lambda: None)),
-    )
 
     metrics = asyncio.run(
         runner.run_benchmark(
