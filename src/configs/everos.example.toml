@@ -24,6 +24,7 @@ answer_max_tokens = 32768
 answer_timeout = 300.0
 answer_max_retries = 5
 ready_timeout = 7200.0
+log_level = "ERROR"
 
 
 [models.memory]

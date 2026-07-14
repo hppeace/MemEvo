@@ -69,9 +69,13 @@ class EverOS:
         answer_timeout: float = 300.0,
         answer_max_retries: int = 5,
         ready_timeout: float = 7200.0,
+        log_level: str = "ERROR",
     ) -> None:
         if eval_owner not in {"speaker_a", "speaker_b"}:
             raise ValueError("eval_owner must be 'speaker_a' or 'speaker_b'")
+        log_level = log_level.upper()
+        if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError(f"invalid EverOS log level: {log_level!r}")
 
         self._answer_llm = answer_llm
         self._memory_llm = memory_llm
@@ -87,6 +91,7 @@ class EverOS:
         self._answer_timeout = answer_timeout
         self._answer_max_retries = answer_max_retries
         self._ready_timeout = ready_timeout
+        self._log_level = log_level
         self._search_slots = asyncio.Semaphore(search_concurrency)
         self._startup_lock = asyncio.Lock()
         self._speakers: dict[int, tuple[str, str]] = {}
@@ -216,6 +221,9 @@ class EverOS:
 
             self._working_dir.mkdir(parents=True, exist_ok=True)
             (self._working_dir / "ome.toml").write_text(_OME_CONFIG, encoding="utf-8")
+            from everos.core.observability.logging import configure_logging
+
+            configure_logging(self._log_level)
             self._configure_environment()
             self._install_singletons()
 
