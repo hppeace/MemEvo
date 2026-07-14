@@ -1,0 +1,72 @@
+# EverOS official LoCoMo settings. Keep credentials in .env.
+
+[run]
+name = "EverOS on LoCoMo"
+output_dir = "runs/everos_example"
+concurrency = 20
+
+
+[dataset]
+name = "locomo"
+path = "data/locomo10.json"
+conv_indices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+exclude_category = 5
+
+
+[algorithm]
+name = "everos"
+method = "agentic"
+top_k = 10
+eval_owner = "speaker_a"
+batch_size = 25
+search_concurrency = 5
+answer_max_tokens = 32768
+answer_timeout = 300.0
+answer_max_retries = 5
+ready_timeout = 7200.0
+
+
+[models.memory]
+model = "gpt-4.1-mini"
+base_url = "https://api.openai.com/v1"
+api_key_env = "LLM_API_KEY"
+
+[models.memory.options]
+temperature = 0.0
+
+
+[models.embedding]
+model = "qwen3-embedding-0.6b"
+base_url = "https://api.deepinfra.com/v1/openai"
+api_key_env = "EMBEDDING_API_KEY"
+
+
+[models.rerank]
+provider = "deepinfra"
+model = "Qwen/Qwen3-Reranker-4B"
+base_url = "https://api.deepinfra.com/v1/inference"
+api_key_env = "RERANK_API_KEY"
+
+[models.rerank.options]
+timeout_seconds = 30.0
+max_retries = 3
+batch_size = 10
+max_concurrent = 5
+
+
+[models.answer]
+model = "gpt-4.1-mini"
+base_url = "https://api.openai.com/v1"
+api_key_env = "ANSWER_API_KEY"
+
+[models.answer.options]
+temperature = 0.0
+
+
+[models.judge]
+model = "gpt-4o-mini"
+base_url = "https://api.openai.com/v1"
+api_key_env = "JUDGE_API_KEY"
+
+[models.judge.options]
+temperature = 0.0
