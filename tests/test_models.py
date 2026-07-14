@@ -92,6 +92,39 @@ def test_models_forward_options_and_track_usage(
     assert summary["stages"]["ingest"]["calls"] == 2
 
 
+def test_each_llm_uses_its_own_sampling_top_k(monkeypatch: Any) -> None:
+    monkeypatch.setenv("API_KEY", "key")
+
+    async def run() -> None:
+        usage = Usage(["memory", "answer", "judge"])
+        clients: dict[str, FakeAPI] = {}
+        models: list[LLM] = []
+        for name, top_k in (("memory", 11), ("answer", 22), ("judge", 33)):
+            llm = LLM(
+                name,
+                {
+                    "model": name,
+                    "api_key_env": "API_KEY",
+                    "options": {"extra_body": {"top_k": top_k}},
+                },
+                usage,
+            )
+            client = FakeAPI()
+            llm.client = client
+            clients[name] = client
+            models.append(llm)
+
+        for llm in models:
+            await llm.chat([{"role": "user", "content": "test"}])
+            await llm.close()
+
+        assert clients["memory"].calls[0]["extra_body"]["top_k"] == 11
+        assert clients["answer"].calls[0]["extra_body"]["top_k"] == 22
+        assert clients["judge"].calls[0]["extra_body"]["top_k"] == 33
+
+    asyncio.run(run())
+
+
 def test_mem0_thread_bridge_keeps_stage(monkeypatch: Any) -> None:
     monkeypatch.setenv("API_KEY", "key")
 

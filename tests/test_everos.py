@@ -20,12 +20,17 @@ class Message:
 class FakeLLM:
     model = "fake-model"
 
-    def __init__(self, response: str = "response") -> None:
+    def __init__(
+        self,
+        response: str = "response",
+        configured_options: dict[str, Any] | None = None,
+    ) -> None:
         self.response = response
+        self.configured_options = configured_options or {}
         self.calls: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
 
     async def chat(self, messages: list[dict[str, Any]], **options: Any) -> str:
-        self.calls.append((messages, options))
+        self.calls.append((messages, self.configured_options | options))
         return self.response
 
 
@@ -145,7 +150,6 @@ def test_everos_retrieves_agentic_top_10_for_speaker_a(monkeypatch: Any) -> None
     algorithm._eval_owner = "speaker_a"
     algorithm._method = "agentic"
     algorithm._top_k = 10
-    algorithm._search_slots = asyncio.Semaphore(5)
 
     result = asyncio.run(algorithm.retrieve(0, "Question?"))
 
@@ -163,11 +167,13 @@ def test_everos_retrieves_agentic_top_10_for_speaker_a(monkeypatch: Any) -> None
     }
 
 
-def test_everos_answer_uses_official_prompt_and_parameters() -> None:
-    llm = FakeLLM("reasoning\n## STEP 7: FINAL ANSWER\nDone")
+def test_everos_answer_uses_prompt_and_configured_temperature() -> None:
+    llm = FakeLLM(
+        "reasoning\n## STEP 7: FINAL ANSWER\nDone",
+        configured_options={"temperature": 0.6, "max_tokens": 4096},
+    )
     algorithm = object.__new__(EverOS)
     algorithm._answer_llm = llm
-    algorithm._answer_max_tokens = 32768
     algorithm._answer_timeout = 300.0
     algorithm._answer_max_retries = 5
     memory = {
@@ -186,18 +192,23 @@ def test_everos_answer_uses_official_prompt_and_parameters() -> None:
     )
     assert "A trip: Went to Hawaii" in messages[0]["content"]
     assert options == {
-        "temperature": 0.0,
-        "max_tokens": 32768,
+        "temperature": 0.6,
+        "max_tokens": 4096,
         "timeout": 300.0,
     }
 
 
 def test_everos_shared_model_adapters_delegate_and_truncate() -> None:
     async def run() -> None:
-        llm = FakeLLM("memory")
+        llm = FakeLLM(
+            "memory",
+            configured_options={"temperature": 0.6, "max_tokens": 4096},
+        )
         embedder = FakeEmbedder()
         response = await _SharedLLM(llm).chat(
             [ChatMessage(role="user", content="remember")],
+            temperature=0.1,
+            max_tokens=123,
             response_format={"type": "json_object"},
         )
         vectors = await _SharedEmbedder(embedder).embed_batch(
@@ -209,7 +220,8 @@ def test_everos_shared_model_adapters_delegate_and_truncate() -> None:
             (
                 [{"role": "user", "content": "remember"}],
                 {
-                    "temperature": 0.0,
+                    "temperature": 0.6,
+                    "max_tokens": 4096,
                     "response_format": {"type": "json_object"},
                 },
             )

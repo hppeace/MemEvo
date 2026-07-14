@@ -19,8 +19,6 @@ method = "agentic"
 top_k = 10
 eval_owner = "speaker_a"
 batch_size = 25
-search_concurrency = 5
-answer_max_tokens = 32768
 answer_timeout = 300.0
 answer_max_retries = 5
 ready_timeout = 7200.0
@@ -62,6 +60,7 @@ api_key_env = "ANSWER_API_KEY"
 
 [models.answer.options]
 temperature = 0.0
+max_tokens = 32768
 
 
 [models.judge]

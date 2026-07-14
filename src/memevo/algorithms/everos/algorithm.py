@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import logging
 import os
 import shutil
 from collections.abc import Mapping, Sequence
@@ -64,8 +65,6 @@ class EverOS:
         top_k: int = 10,
         eval_owner: str = "speaker_a",
         batch_size: int = 25,
-        search_concurrency: int = 5,
-        answer_max_tokens: int = 32768,
         answer_timeout: float = 300.0,
         answer_max_retries: int = 5,
         ready_timeout: float = 7200.0,
@@ -87,12 +86,10 @@ class EverOS:
         self._top_k = top_k
         self._eval_owner = eval_owner
         self._batch_size = batch_size
-        self._answer_max_tokens = answer_max_tokens
         self._answer_timeout = answer_timeout
         self._answer_max_retries = answer_max_retries
         self._ready_timeout = ready_timeout
         self._log_level = log_level
-        self._search_slots = asyncio.Semaphore(search_concurrency)
         self._startup_lock = asyncio.Lock()
         self._speakers: dict[int, tuple[str, str]] = {}
 
@@ -151,8 +148,7 @@ class EverOS:
             app_id="locomo_benchmark",
             project_id="memevo",
         )
-        async with self._search_slots:
-            response = await search(request)
+        response = await search(request)
         return {
             "episodes": [
                 item.model_dump(mode="json") for item in response.data.episodes
@@ -169,8 +165,6 @@ class EverOS:
             try:
                 response = await self._answer_llm.chat(
                     [{"role": "user", "content": prompt}],
-                    temperature=0.0,
-                    max_tokens=self._answer_max_tokens,
                     timeout=self._answer_timeout,
                 )
                 answer = extract_final_answer(response)
@@ -224,6 +218,8 @@ class EverOS:
             from everos.core.observability.logging import configure_logging
 
             configure_logging(self._log_level)
+            jieba = importlib.import_module("jieba")
+            jieba.setLogLevel(getattr(logging, self._log_level))
             self._configure_environment()
             self._install_singletons()
 
@@ -364,9 +360,6 @@ class _SharedLLM:
         **extra: Any,
     ) -> ChatResponse:
         options = dict(extra)
-        options["temperature"] = 0.0 if temperature is None else temperature
-        if max_tokens is not None:
-            options["max_tokens"] = max_tokens
         if response_format is not None:
             options["response_format"] = dict(response_format)
         response = await self._client.chat(
