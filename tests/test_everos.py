@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -150,6 +151,7 @@ def test_everos_retrieves_agentic_top_10_for_speaker_a(monkeypatch: Any) -> None
     algorithm._eval_owner = "speaker_a"
     algorithm._method = "agentic"
     algorithm._top_k = 10
+    algorithm._agentic_json_max_retries = 3
 
     result = asyncio.run(algorithm.retrieve(0, "Question?"))
 
@@ -165,6 +167,87 @@ def test_everos_retrieves_agentic_top_10_for_speaker_a(monkeypatch: Any) -> None
         "profiles": [],
         "speakers": ("Caroline", "Melanie"),
     }
+
+
+def test_everos_retries_agentic_json_errors(monkeypatch: Any) -> None:
+    calls = 0
+    delays: list[int] = []
+
+    async def search(request: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise json.JSONDecodeError("Expecting value", "{}", 1)
+        return "found"
+
+    async def sleep(delay: int) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(everos_algorithm, "search", search)
+    monkeypatch.setattr(everos_algorithm.asyncio, "sleep", sleep)
+    algorithm = object.__new__(EverOS)
+    algorithm._method = "agentic"
+    algorithm._agentic_json_max_retries = 3
+
+    result = asyncio.run(algorithm._search(SimpleNamespace()))
+
+    assert result == "found"
+    assert calls == 3
+    assert delays == [1, 2]
+
+
+def test_everos_does_not_retry_unrelated_search_errors(monkeypatch: Any) -> None:
+    calls = 0
+
+    async def search(request: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        raise ValueError("invalid search configuration")
+
+    monkeypatch.setattr(everos_algorithm, "search", search)
+    algorithm = object.__new__(EverOS)
+    algorithm._method = "agentic"
+    algorithm._agentic_json_max_retries = 3
+
+    try:
+        asyncio.run(algorithm._search(SimpleNamespace()))
+    except ValueError as exc:
+        assert str(exc) == "invalid search configuration"
+    else:
+        raise AssertionError("expected unrelated search error")
+
+    assert calls == 1
+
+
+def test_everos_raises_after_agentic_json_retries_are_exhausted(
+    monkeypatch: Any,
+) -> None:
+    calls = 0
+    delays: list[int] = []
+
+    async def search(request: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        raise ValueError("No JSON object found in LLM response: 'invalid'")
+
+    async def sleep(delay: int) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(everos_algorithm, "search", search)
+    monkeypatch.setattr(everos_algorithm.asyncio, "sleep", sleep)
+    algorithm = object.__new__(EverOS)
+    algorithm._method = "agentic"
+    algorithm._agentic_json_max_retries = 2
+
+    try:
+        asyncio.run(algorithm._search(SimpleNamespace()))
+    except ValueError as exc:
+        assert str(exc) == "No JSON object found in LLM response: 'invalid'"
+    else:
+        raise AssertionError("expected exhausted Agentic JSON error")
+
+    assert calls == 3
+    assert delays == [1, 2]
 
 
 def test_everos_answer_uses_prompt_and_configured_temperature() -> None:

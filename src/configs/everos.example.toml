@@ -21,6 +21,7 @@ eval_owner = "speaker_a"
 batch_size = 25
 answer_timeout = 300.0
 answer_max_retries = 5
+agentic_json_max_retries = 3
 ready_timeout = 7200.0
 log_level = "ERROR"
 

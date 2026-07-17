@@ -29,6 +29,7 @@ def create(
         batch_size=int(settings.get("batch_size", 25)),
         answer_timeout=float(settings.get("answer_timeout", 300.0)),
         answer_max_retries=int(settings.get("answer_max_retries", 5)),
+        agentic_json_max_retries=int(settings.get("agentic_json_max_retries", 3)),
         ready_timeout=float(settings.get("ready_timeout", 7200.0)),
         log_level=str(settings.get("log_level", "ERROR")),
     )

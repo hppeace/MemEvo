@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 import logging
 import os
 import shutil
@@ -67,6 +68,7 @@ class EverOS:
         batch_size: int = 25,
         answer_timeout: float = 300.0,
         answer_max_retries: int = 5,
+        agentic_json_max_retries: int = 3,
         ready_timeout: float = 7200.0,
         log_level: str = "ERROR",
     ) -> None:
@@ -75,6 +77,8 @@ class EverOS:
         log_level = log_level.upper()
         if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError(f"invalid EverOS log level: {log_level!r}")
+        if agentic_json_max_retries < 0:
+            raise ValueError("agentic_json_max_retries must be non-negative")
 
         self._answer_llm = answer_llm
         self._memory_llm = memory_llm
@@ -88,6 +92,7 @@ class EverOS:
         self._batch_size = batch_size
         self._answer_timeout = answer_timeout
         self._answer_max_retries = answer_max_retries
+        self._agentic_json_max_retries = agentic_json_max_retries
         self._ready_timeout = ready_timeout
         self._log_level = log_level
         self._startup_lock = asyncio.Lock()
@@ -148,7 +153,7 @@ class EverOS:
             app_id="locomo_benchmark",
             project_id="memevo",
         )
-        response = await search(request)
+        response = await self._search(request)
         return {
             "episodes": [
                 item.model_dump(mode="json") for item in response.data.episodes
@@ -158,6 +163,20 @@ class EverOS:
             ],
             "speakers": speakers,
         }
+
+    async def _search(self, request: SearchRequest) -> Any:
+        for attempt in range(self._agentic_json_max_retries + 1):
+            try:
+                return await search(request)
+            except ValueError as exc:
+                retryable = self._method == "agentic" and (
+                    isinstance(exc, json.JSONDecodeError)
+                    or str(exc).startswith("No JSON object found in LLM response:")
+                )
+                if not retryable or attempt == self._agentic_json_max_retries:
+                    raise
+                await asyncio.sleep(2**attempt)
+        raise RuntimeError("unreachable Agentic search retry state")
 
     async def answer(self, question: str, memory: dict[str, Any]) -> str:
         prompt = prepare_answer_prompt(memory, question)
