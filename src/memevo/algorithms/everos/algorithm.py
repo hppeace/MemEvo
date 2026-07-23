@@ -489,11 +489,21 @@ def _adapter_reranker(
 async def _raise_for_ome_failures(ome: Any) -> None:
     failed: list[str] = []
     for strategy in _OME_STRATEGIES:
+        # EverOS keeps one record per attempt and returns newest records first.
+        # A FAILED attempt is retryable and remains in history after a later
+        # attempt succeeds, so only the newest attempt for each event is final.
         records = await ome.list_runs(strategy, limit=1000)
-        failed.extend(
-            f"{record.strategy_name}:{record.status}"
-            for record in records
-            if str(record.status) in {"failed", "dead_letter", "crashed"}
-        )
+        latest_by_event: dict[str, Any] = {}
+        for record in records:
+            event_key = record.event_id or record.run_id
+            latest_by_event.setdefault(event_key, record)
+
+        for record in latest_by_event.values():
+            status = str(record.status)
+            if status in {"failed", "dead_letter", "crashed"}:
+                failed.append(
+                    f"{record.strategy_name}:{status}"
+                    f"(event_id={record.event_id}, attempt={record.attempt})"
+                )
     if failed:
         raise RuntimeError(f"EverOS OME failed: {', '.join(failed)}")

@@ -250,6 +250,66 @@ def test_everos_raises_after_agentic_json_retries_are_exhausted(
     assert delays == [1, 2]
 
 
+def test_everos_ignores_ome_failure_recovered_by_retry() -> None:
+    class FakeOME:
+        async def list_runs(self, strategy: str, *, limit: int) -> list[Any]:
+            assert limit == 1000
+            if strategy != "extract_atomic_facts":
+                return []
+            return [
+                SimpleNamespace(
+                    strategy_name=strategy,
+                    status="success",
+                    event_id="event-1",
+                    run_id="run-2",
+                    attempt=1,
+                ),
+                SimpleNamespace(
+                    strategy_name=strategy,
+                    status="failed",
+                    event_id="event-1",
+                    run_id="run-1",
+                    attempt=0,
+                ),
+            ]
+
+    asyncio.run(everos_algorithm._raise_for_ome_failures(FakeOME()))
+
+
+def test_everos_raises_for_latest_ome_failure() -> None:
+    class FakeOME:
+        async def list_runs(self, strategy: str, *, limit: int) -> list[Any]:
+            assert limit == 1000
+            if strategy != "extract_atomic_facts":
+                return []
+            return [
+                SimpleNamespace(
+                    strategy_name=strategy,
+                    status="dead_letter",
+                    event_id="event-1",
+                    run_id="run-3",
+                    attempt=2,
+                ),
+                SimpleNamespace(
+                    strategy_name=strategy,
+                    status="failed",
+                    event_id="event-1",
+                    run_id="run-2",
+                    attempt=1,
+                ),
+            ]
+
+    try:
+        asyncio.run(everos_algorithm._raise_for_ome_failures(FakeOME()))
+    except RuntimeError as exc:
+        assert str(exc) == (
+            "EverOS OME failed: extract_atomic_facts:dead_letter"
+            "(event_id=event-1, attempt=2)"
+        )
+    else:
+        raise AssertionError("expected final OME failure")
+
+
 def test_everos_answer_uses_prompt_and_configured_temperature() -> None:
     llm = FakeLLM(
         "reasoning\n## STEP 7: FINAL ANSWER\nDone",
